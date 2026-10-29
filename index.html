@@ -2,7 +2,8 @@
 <html lang="de-AT">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#1f5fa8">
 <title>Robin Seido</title>
 <meta name="description" content="Diese Seite gehört Robin Seido.">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='34' fill='%23ed2939'/%3E%3Crect y='34' width='100' height='32' fill='%23fff'/%3E%3Crect y='66' width='100' height='34' fill='%23ed2939'/%3E%3C/svg%3E">
@@ -10,47 +11,452 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Gloock&display=swap" rel="stylesheet">
 <style>
-  * { box-sizing: border-box; margin: 0; }
-  html, body { height: 100%; }
-  body {
-    display: grid;
-    grid-template-rows: 1fr 1fr 1fr;
-    background: #ed2939;
-    color: #1d1416;
-    font-family: "Gloock", Georgia, "Times New Roman", serif;
+  html, body { margin: 0; height: 100%; background: #1f5fa8; overflow: hidden; }
+  canvas { display: block; cursor: pointer; touch-action: manipulation; }
+  .sr-only {
+    position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0;
+    overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0;
   }
-  .rot { background: #ed2939; }
-  .weiss {
-    background: #ffffff;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    padding: 1.5rem;
-    text-align: center;
-  }
-  h1 {
-    font-weight: 400;
-    font-size: clamp(2.2rem, 7.5vw, 6.5rem);
-    line-height: 1.05;
-    letter-spacing: -0.01em;
-    max-width: 14ch;
-    text-wrap: balance;
-    animation: rein 0.9s ease-out both;
-  }
-  @keyframes rein {
-    from { opacity: 0; transform: scale(1.12); }
-    to   { opacity: 1; transform: scale(1); }
-  }
-  @media (prefers-reduced-motion: reduce) {
-    h1 { animation: none; }
-  }
+  noscript { position: absolute; inset: 0; display: grid; place-items: center; font: 2rem Georgia, serif; color: #fff; text-align: center; padding: 2rem; }
 </style>
 </head>
 <body>
-  <div class="rot"></div>
-  <main class="weiss">
-    <h1>Diese Seite gehört Robin Seido.</h1>
-  </main>
-  <div class="rot"></div>
+<h1 class="sr-only">Diese Seite gehört Robin Seido.</h1>
+<canvas id="c" aria-hidden="true"></canvas>
+<noscript>Diese Seite gehört Robin Seido.</noscript>
+
+<script>
+(function () {
+  'use strict';
+
+  var canvas = document.getElementById('c');
+  var ctx = canvas.getContext('2d');
+  var reduce = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var TAU = Math.PI * 2;
+
+  /* ---------- helpers ---------- */
+  function rng(seed) {
+    return function () {
+      seed |= 0; seed = seed + 0x6D2B79F5 | 0;
+      var t = Math.imul(seed ^ seed >>> 15, 1 | seed);
+      t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+      return ((t ^ t >>> 14) >>> 0) / 4294967296;
+    };
+  }
+  function makeNoise(seed) {
+    var r = rng(seed), p = [];
+    for (var i = 0; i < 512; i++) p.push(r());
+    return function (x) {
+      var i = Math.floor(x), f = x - i;
+      var a = p[((i % 512) + 512) % 512], b = p[(((i + 1) % 512) + 512) % 512];
+      var s = f * f * (3 - 2 * f);
+      return a + (b - a) * s;
+    };
+  }
+  function ridge(noise, x, scale, oct) {
+    var sum = 0, amp = 1, tot = 0, fr = 1;
+    for (var o = 0; o < oct; o++) {
+      var n = noise(x * fr / scale + o * 37.7);
+      n = 1 - Math.abs(2 * n - 1);
+      sum += n * amp; tot += amp; amp *= 0.5; fr *= 2.1;
+    }
+    return sum / tot;
+  }
+  function clamp(v, a, b) { return v < a ? a : (v > b ? b : v); }
+
+  /* ---------- state ---------- */
+  var W, H, dpr;
+  var layers = {};
+  var clouds = [], birds = [];
+  var pw, rb, poleX, poleTop;
+  var fw, fh, flagX, flagY, flagImg;
+  var COLS, ROWS = 8, SW;
+  var G, XV;
+  var p1 = 0.4, p2 = 1.9, p3 = 3.1;
+  var wind = 0.9, gust = 0;
+  var shadeStyles = [];
+  for (var si = 0; si <= 24; si++) {
+    var sh = (si - 12) / 12;
+    shadeStyles.push(sh > 0
+      ? 'rgba(14,0,6,' + (sh * 0.42).toFixed(3) + ')'
+      : 'rgba(255,250,240,' + (-sh * 0.30).toFixed(3) + ')');
+  }
+
+  function mk() {
+    var c = document.createElement('canvas');
+    c.width = Math.round(W * dpr); c.height = Math.round(H * dpr);
+    var g = c.getContext('2d');
+    g.scale(dpr, dpr);
+    return { c: c, g: g };
+  }
+
+  /* ---------- sky ---------- */
+  function buildSky() {
+    var L = mk(), g = L.g;
+    var gr = g.createLinearGradient(0, 0, 0, H * 0.85);
+    gr.addColorStop(0, '#1f5fa8');
+    gr.addColorStop(0.35, '#4f93d1');
+    gr.addColorStop(0.65, '#a9d3ee');
+    gr.addColorStop(1, '#e3f1f7');
+    g.fillStyle = gr; g.fillRect(0, 0, W, H);
+    var sx = W * 0.82, sy = H * 0.16;
+    var glow = g.createRadialGradient(sx, sy, 0, sx, sy, H * 0.55);
+    glow.addColorStop(0, 'rgba(255,246,218,0.85)');
+    glow.addColorStop(0.25, 'rgba(255,240,200,0.35)');
+    glow.addColorStop(1, 'rgba(255,240,200,0)');
+    g.fillStyle = glow; g.fillRect(0, 0, W, H);
+    var core = g.createRadialGradient(sx, sy, 0, sx, sy, H * 0.04);
+    core.addColorStop(0, '#ffffff'); core.addColorStop(0.7, '#fffbe6'); core.addColorStop(1, 'rgba(255,251,230,0)');
+    g.fillStyle = core; g.beginPath(); g.arc(sx, sy, H * 0.04, 0, TAU); g.fill();
+    layers.sky = L.c;
+  }
+
+  /* ---------- clouds ---------- */
+  function makeCloud(w, h, rand) {
+    var c = document.createElement('canvas');
+    c.width = Math.ceil(w); c.height = Math.ceil(h);
+    var g = c.getContext('2d');
+    for (var j = 0; j < 11; j++) {
+      var cx = h * 0.5 + rand() * (w - h);
+      var rad = h * (0.26 + rand() * 0.26);
+      var cy = h * 0.62 - rand() * h * 0.28;
+      var gr = g.createRadialGradient(cx, cy, 0, cx, cy, rad);
+      gr.addColorStop(0, 'rgba(255,255,255,0.95)');
+      gr.addColorStop(0.6, 'rgba(255,255,255,0.55)');
+      gr.addColorStop(1, 'rgba(255,255,255,0)');
+      g.fillStyle = gr; g.beginPath(); g.arc(cx, cy, rad, 0, TAU); g.fill();
+    }
+    g.globalCompositeOperation = 'source-atop';
+    var sg = g.createLinearGradient(0, 0, 0, h);
+    sg.addColorStop(0, 'rgba(255,255,255,0)');
+    sg.addColorStop(0.5, 'rgba(255,255,255,0)');
+    sg.addColorStop(1, 'rgba(120,150,190,0.45)');
+    g.fillStyle = sg; g.fillRect(0, 0, w, h);
+    return c;
+  }
+  function buildClouds() {
+    var rand = rng(21), k = clamp(W / 1200, 0.6, 1.3);
+    clouds = [];
+    for (var i = 0; i < 7; i++) {
+      var w = (200 + rand() * 240) * k, h = w * (0.32 + rand() * 0.12);
+      clouds.push({
+        img: makeCloud(w, h, rand),
+        w: w, h: h,
+        y: H * (0.05 + rand() * 0.42),
+        x0: rand() * (W + w * 2),
+        v: 3 + (w / k - 200) * 0.04 + rand() * 2,
+        a: 0.55 + rand() * 0.4
+      });
+    }
+  }
+
+  /* ---------- mountains, forest, meadow ---------- */
+  function mountainLayer(g, o) {
+    var noise = makeNoise(o.seed), pts = [], minY = 1e9;
+    for (var x = 0; x <= W + 3; x += 3) {
+      var y = o.baseY - o.amp * ridge(noise, x, o.scale, 5);
+      pts.push([x, y]); if (y < minY) minY = y;
+    }
+    var gr = g.createLinearGradient(0, minY, 0, o.baseY + o.amp * 0.25);
+    if (o.snow) {
+      gr.addColorStop(0, '#ffffff');
+      gr.addColorStop(0.14, '#f1f6fb');
+      gr.addColorStop(0.32, o.rock);
+    } else {
+      gr.addColorStop(0, o.rock);
+    }
+    gr.addColorStop(1, o.haze);
+    g.beginPath(); g.moveTo(0, H);
+    for (var i = 0; i < pts.length; i++) g.lineTo(pts[i][0], pts[i][1]);
+    g.lineTo(W + 3, H); g.closePath();
+    g.fillStyle = gr; g.fill();
+    return pts;
+  }
+  function spruces(g, pts, rand, color, h0) {
+    g.fillStyle = color;
+    for (var i = 0; i < pts.length - 1; i += 1 + Math.floor(rand() * 3)) {
+      var p = pts[i], th = h0 * (0.6 + rand() * 0.9), tw = th * 0.36;
+      g.beginPath();
+      g.moveTo(p[0], p[1] - th * 0.62);
+      g.lineTo(p[0] - tw, p[1] + th * 0.38);
+      g.lineTo(p[0] + tw, p[1] + th * 0.38);
+      g.closePath(); g.fill();
+    }
+  }
+  function buildLand() {
+    var L = mk(), g = L.g, rand = rng(5);
+    var sc = Math.max(140, W * 0.22);
+    mountainLayer(g, { baseY: H * 0.62, amp: H * 0.30, scale: sc, seed: 3, rock: '#8ea6c4', haze: '#d4e5f1', snow: true });
+    mountainLayer(g, { baseY: H * 0.70, amp: H * 0.24, scale: sc * 0.8, seed: 11, rock: '#6b86a8', haze: '#b9d2e6', snow: true });
+    mountainLayer(g, { baseY: H * 0.78, amp: H * 0.14, scale: sc * 0.7, seed: 29, rock: '#4d6a86', haze: '#8fb0c6', snow: false });
+    var pts = mountainLayer(g, { baseY: H * 0.85, amp: H * 0.07, scale: Math.max(90, W * 0.12), seed: 47, rock: '#2f5a3e', haze: '#1f4a2f', snow: false });
+    spruces(g, pts, rand, '#1d472d', Math.max(10, H * 0.022));
+    layers.land = L.c;
+  }
+  function buildFore() {
+    var L = mk(), g = L.g, rand = rng(7), noise = makeNoise(91);
+    var top = H * 0.9;
+    function mY(x) { return top - H * 0.028 * noise(x / (W * 0.25) + 3); }
+    g.beginPath(); g.moveTo(0, H);
+    for (var x = 0; x <= W + 4; x += 4) g.lineTo(x, mY(x));
+    g.lineTo(W + 4, H); g.closePath();
+    var gr = g.createLinearGradient(0, top - H * 0.03, 0, H);
+    gr.addColorStop(0, '#6db33f'); gr.addColorStop(0.35, '#4a9132'); gr.addColorStop(1, '#1f5a26');
+    g.fillStyle = gr; g.fill();
+
+    var greens = ['#86c653', '#5fa83a', '#3f8a2c', '#a4d86a', '#2f7a2a'];
+    var nb = Math.min(3500, Math.round(W * H / 380));
+    g.lineWidth = 1; g.lineCap = 'round';
+    for (var n = 0; n < nb; n++) {
+      var bx = rand() * W, by = mY(bx) + rand() * H * 0.08;
+      var depth = 0.7 + (by - top) / (H * 0.1);
+      var hgt = (4 + rand() * 8) * clamp(depth, 0.6, 1.8);
+      g.strokeStyle = greens[Math.floor(rand() * greens.length)];
+      g.beginPath(); g.moveTo(bx, by);
+      g.quadraticCurveTo(bx + rand() * 4 - 2, by - hgt * 0.6, bx + rand() * 6 - 3, by - hgt);
+      g.stroke();
+    }
+    var flowers = ['#ffffff', '#ffd84a', '#ed2939', '#fff3b0'];
+    for (var f = 0; f < 70; f++) {
+      var fx = rand() * W, fy = mY(fx) + H * 0.012 + rand() * (H - mY(fx)) * 0.6;
+      var fr = 1.1 + rand() * ((fy - top) / H) * 16 + rand();
+      g.fillStyle = flowers[Math.floor(rand() * flowers.length)];
+      g.beginPath(); g.arc(fx, fy, fr, 0, TAU); g.fill();
+    }
+    layers.fore = L.c;
+  }
+
+  /* ---------- flag texture ---------- */
+  function buildFlag(fontOk) {
+    var c = document.createElement('canvas');
+    c.width = Math.round(fw * dpr); c.height = Math.round(fh * dpr);
+    var g = c.getContext('2d');
+    g.scale(c.width / fw, c.height / fh);
+    var rand = rng(13), x, y;
+
+    g.fillStyle = '#ed2939'; g.fillRect(0, 0, fw, fh);
+    g.fillStyle = '#ffffff'; g.fillRect(0, fh / 3, fw, fh / 3);
+
+    // soft unevenness in the cloth
+    for (var b = 0; b < 16; b++) {
+      var bx = rand() * fw, by = rand() * fh, br = fh * (0.2 + rand() * 0.3);
+      var bg = g.createRadialGradient(bx, by, 0, bx, by, br);
+      var dark = rand() < 0.5;
+      bg.addColorStop(0, dark ? 'rgba(0,0,0,0.04)' : 'rgba(255,255,255,0.05)');
+      bg.addColorStop(1, 'rgba(0,0,0,0)');
+      g.fillStyle = bg; g.fillRect(bx - br, by - br, br * 2, br * 2);
+    }
+    // woven threads
+    for (x = 0; x < fw; x += 2) { g.fillStyle = 'rgba(0,0,0,0.05)'; g.fillRect(x, 0, 0.7, fh); }
+    for (x = 1; x < fw; x += 2) { g.fillStyle = 'rgba(255,255,255,0.08)'; g.fillRect(x, 0, 0.7, fh); }
+    for (y = 0; y < fh; y += 2) { g.fillStyle = 'rgba(0,0,0,0.04)'; g.fillRect(0, y, fw, 0.7); }
+
+    // seams between the stripes
+    g.fillStyle = 'rgba(0,0,0,0.07)';
+    g.fillRect(0, fh / 3 - 0.5, fw, 1); g.fillRect(0, fh * 2 / 3 - 0.5, fw, 1);
+
+    // hem and stitching
+    var hw = Math.max(5, fw * 0.022);
+    g.fillStyle = 'rgba(0,0,0,0.10)'; g.fillRect(0, 0, hw, fh);
+    g.strokeStyle = 'rgba(60,35,35,0.4)'; g.lineWidth = 0.9; g.setLineDash([3, 2.2]);
+    g.beginPath();
+    g.moveTo(hw, 0); g.lineTo(hw, fh);
+    g.moveTo(0, hw * 0.7); g.lineTo(fw, hw * 0.7);
+    g.moveTo(0, fh - hw * 0.7); g.lineTo(fw, fh - hw * 0.7);
+    g.stroke(); g.setLineDash([]);
+
+    // grommets
+    [fh * 0.08, fh * 0.92].forEach(function (gy) {
+      g.fillStyle = '#cfd4d8'; g.strokeStyle = '#6f757b'; g.lineWidth = 0.8;
+      g.beginPath(); g.arc(hw / 2, gy, hw * 0.3, 0, TAU); g.fill(); g.stroke();
+      g.fillStyle = 'rgba(0,0,0,0.5)';
+      g.beginPath(); g.arc(hw / 2, gy, hw * 0.12, 0, TAU); g.fill();
+    });
+
+    // the one sentence
+    var bh = fh / 3;
+    var fs = Math.min(bh * 0.34, fw * 0.085);
+    g.fillStyle = 'rgba(36,23,25,0.94)';
+    g.textAlign = 'center'; g.textBaseline = 'middle';
+    g.font = '400 ' + fs + 'px ' + (fontOk ? 'Gloock, ' : '') + 'Georgia, "Times New Roman", serif';
+    var cx = fw * 0.5 + hw * 0.5, cy = fh * 0.5;
+    g.fillText('Diese Seite gehört', cx, cy - fs * 0.58);
+    g.fillText('Robin Seido.', cx, cy + fs * 0.58);
+
+    flagImg = c;
+  }
+
+  /* ---------- sizing ---------- */
+  function build(fontOk) {
+    dpr = Math.min(window.devicePixelRatio || 1, 2);
+    W = window.innerWidth; H = window.innerHeight;
+    canvas.width = Math.round(W * dpr); canvas.height = Math.round(H * dpr);
+    canvas.style.width = W + 'px'; canvas.style.height = H + 'px';
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+    pw = Math.max(6, Math.min(14, W * 0.009));
+    rb = pw * 1.15;
+    fw = Math.min(W - W * 0.1 - pw, H * 0.68);
+    fh = fw * 2 / 3;
+    poleX = (W - fw) / 2;
+    poleTop = H * 0.06 + rb;
+    flagX = poleX + pw / 2;
+    flagY = poleTop + rb * 2.6;
+
+    COLS = Math.max(20, Math.round(fw / 3));
+    SW = fw / COLS;
+    G = new Float32Array((COLS + 1) * (ROWS + 1));
+    XV = new Float32Array(COLS + 1);
+
+    buildSky(); buildClouds(); buildLand(); buildFore(); buildFlag(fontOk);
+
+    var r = rng(77), k = clamp(W / 1200, 0.7, 1.2);
+    birds = [];
+    for (var i = 0; i < 4; i++) {
+      birds.push({ x: r() * W, y: H * (0.1 + r() * 0.3), s: (6 + r() * 5) * k, v: 18 + r() * 14, ph: r() * 6 });
+    }
+  }
+
+  /* ---------- drawing ---------- */
+  function drawClouds(t) {
+    for (var i = 0; i < clouds.length; i++) {
+      var c = clouds[i];
+      var span = W + c.w * 2;
+      var x = ((c.x0 + (reduce ? 0 : t * c.v)) % span) - c.w;
+      ctx.globalAlpha = c.a;
+      ctx.drawImage(c.img, x, c.y, c.w, c.h);
+    }
+    ctx.globalAlpha = 1;
+  }
+  function drawBirds(t) {
+    ctx.strokeStyle = '#2a3340'; ctx.lineWidth = 1.3; ctx.lineCap = 'round';
+    for (var i = 0; i < birds.length; i++) {
+      var b = birds[i];
+      var x = ((b.x + (reduce ? 0 : t * b.v)) % (W + 60)) - 30;
+      var y = b.y + Math.sin(t * 0.6 + b.ph) * 6;
+      var flap = Math.sin(t * 7 + b.ph) * b.s * 0.55;
+      ctx.beginPath();
+      ctx.moveTo(x - b.s, y - flap);
+      ctx.quadraticCurveTo(x - b.s * 0.4, y - flap * 1.3 - b.s * 0.25, x, y);
+      ctx.quadraticCurveTo(x + b.s * 0.4, y - flap * 1.3 - b.s * 0.25, x + b.s, y - flap);
+      ctx.stroke();
+    }
+  }
+  function drawFlag() {
+    var A = fh * 0.062 * Math.min(wind, 2.0);
+    var droop = fh * 0.07 * (1.2 - Math.min(wind, 1.3) * 0.75);
+    var R1 = ROWS + 1, i, r;
+    for (i = 0; i <= COLS; i++) {
+      var u = i / COLS, env = Math.pow(u, 1.1);
+      for (r = 0; r <= ROWS; r++) {
+        var v = r / ROWS;
+        var w1 = Math.sin(TAU * (1.8 * u + 0.16 * v) - p1);
+        var w2 = Math.sin(TAU * (3.3 * u - 0.22 * v) - p2) * 0.38;
+        var w3 = Math.sin(TAU * (6.5 * u + 0.45 * v) - p3) * 0.12 * u;
+        G[i * R1 + r] = A * env * (w1 + w2 + w3) + droop * u * u;
+      }
+    }
+    var mid = ROWS >> 1, x = flagX;
+    XV[0] = x;
+    for (i = 0; i < COLS; i++) {
+      var s = (G[(i + 1) * R1 + mid] - G[i * R1 + mid]) / SW;
+      x += SW / Math.sqrt(1 + s * s);
+      XV[i + 1] = x;
+    }
+    var rh = fh / ROWS;
+    var srcW = flagImg.width / COLS, srcH = flagImg.height / ROWS;
+    for (i = 0; i < COLS; i++) {
+      var dx = XV[i + 1] - XV[i] + 0.9;
+      for (r = 0; r < ROWS; r++) {
+        var yT = flagY + r * rh + G[i * R1 + r];
+        var yB = flagY + (r + 1) * rh + G[i * R1 + r + 1];
+        var hh = yB - yT + 0.9;
+        ctx.drawImage(flagImg, i * srcW, r * srcH, srcW, srcH, XV[i], yT, dx, hh);
+        var sx = ((G[(i + 1) * R1 + r] - G[i * R1 + r]) + (G[(i + 1) * R1 + r + 1] - G[i * R1 + r + 1])) / (2 * SW);
+        var q = Math.round(clamp(sx * 0.6, -1, 1) * 12) + 12;
+        ctx.fillStyle = shadeStyles[q];
+        ctx.fillRect(XV[i], yT, dx, hh);
+      }
+    }
+  }
+  function drawPole() {
+    var x = poleX, w = pw;
+    var gr = ctx.createLinearGradient(x - w / 2, 0, x + w / 2, 0);
+    gr.addColorStop(0, '#6d7276'); gr.addColorStop(0.3, '#f4f6f8'); gr.addColorStop(0.55, '#b5bbc0'); gr.addColorStop(1, '#4b5055');
+    ctx.fillStyle = gr;
+    ctx.fillRect(x - w / 2, poleTop + rb * 0.8, w, H);
+
+    // rings holding the flag
+    ctx.strokeStyle = '#c9ced3'; ctx.lineWidth = Math.max(2, w * 0.28);
+    [flagY + fh * 0.08, flagY + fh * 0.92].forEach(function (ry) {
+      ctx.beginPath(); ctx.ellipse(x, ry, w * 0.85, w * 0.45, 0, 0, TAU); ctx.stroke();
+    });
+
+    // golden collar and ball
+    ctx.fillStyle = '#c99a1c';
+    ctx.fillRect(x - w * 0.75, poleTop + rb * 0.55, w * 1.5, rb * 0.5);
+    var bg = ctx.createRadialGradient(x - rb * 0.35, poleTop - rb * 0.35, rb * 0.1, x, poleTop, rb);
+    bg.addColorStop(0, '#fff3b0'); bg.addColorStop(0.35, '#e6b422'); bg.addColorStop(1, '#7a5a0a');
+    ctx.fillStyle = bg;
+    ctx.beginPath(); ctx.arc(x, poleTop, rb, 0, TAU); ctx.fill();
+  }
+  function render(t) {
+    ctx.drawImage(layers.sky, 0, 0, W, H);
+    drawClouds(t);
+    ctx.drawImage(layers.land, 0, 0, W, H);
+    drawBirds(t);
+    drawFlag();
+    drawPole();
+    ctx.drawImage(layers.fore, 0, 0, W, H);
+  }
+
+  /* ---------- wind and loop ---------- */
+  var last = 0, raf = 0;
+  function frame(ts) {
+    var t = ts / 1000, dt = Math.min(0.05, t - last); last = t;
+    var base = 0.85 + 0.2 * Math.sin(t * 0.35) + 0.1 * Math.sin(t * 0.93 + 1.3) + 0.06 * Math.sin(t * 2.1);
+    gust *= Math.exp(-dt * 0.9);
+    wind = base + gust;
+    var sp = 0.35 + 0.65 * wind;
+    p1 += dt * TAU * 1.0 * sp;
+    p2 += dt * TAU * 1.7 * sp;
+    p3 += dt * TAU * 2.6 * sp;
+    render(t);
+    raf = requestAnimationFrame(frame);
+  }
+
+  var lx = null, ly = null;
+  window.addEventListener('pointermove', function (e) {
+    if (reduce) return;
+    if (lx !== null) gust = Math.min(gust + Math.hypot(e.clientX - lx, e.clientY - ly) * 0.0015, 1.4);
+    lx = e.clientX; ly = e.clientY;
+  }, { passive: true });
+  window.addEventListener('pointerdown', function () {
+    if (!reduce) gust = Math.min(gust + 1.1, 2);
+  }, { passive: true });
+
+  var rt = 0;
+  var fontOk = false;
+  window.addEventListener('resize', function () {
+    clearTimeout(rt);
+    rt = setTimeout(function () {
+      build(fontOk);
+      if (reduce) { wind = 0.7; render(0); }
+    }, 150);
+  });
+
+  function start() {
+    build(fontOk);
+    if (reduce) { wind = 0.7; render(0); }
+    else raf = requestAnimationFrame(frame);
+  }
+
+  var timeout = new Promise(function (res) { setTimeout(res, 1500); });
+  var fontLoad = (document.fonts && document.fonts.load)
+    ? document.fonts.load('400 40px Gloock').then(function (f) { fontOk = !!(f && f.length); }, function () {})
+    : Promise.resolve();
+  Promise.race([fontLoad, timeout]).then(start);
+})();
+</script>
 </body>
 </html>
